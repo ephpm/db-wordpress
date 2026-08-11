@@ -215,14 +215,20 @@ The differences this package's authors have actually verified:
 SQL and behave exactly as on ePHPm's MySQL wire path: the per-thread
 bridge session tracks transaction state.
 
-One caveat, straight from the bridge's own documentation: the session
-lives on the PHP **worker thread**, not the request. Always
-`COMMIT`/`ROLLBACK` before your request ends.
-[ephpm#258](https://github.com/ephpm/ephpm/pull/258) (in review at time
-of writing) adds an automatic `ROLLBACK` of abandoned transactions at
-request end as a safety net — once merged, a mid-request fatal can no
-longer leak an open transaction into the next request served by that
-thread.
+Commit (or roll back) explicitly before your response is done — that's
+the correct shape for request-scoped work, same as it would be against
+a real MySQL server.
+
+If a script doesn't — including when a mid-request PHP fatal makes
+finishing impossible — the transaction is **not** leaked: at request
+end the server rolls back any transaction left open on the bridge
+session and logs a warning
+([ephpm#258](https://github.com/ephpm/ephpm/pull/258), on ePHPm main
+alongside the bridge itself; the teardown covers both fpm-style and
+worker-mode execution and is proven by ePHPm's E2E suite). Treat that
+rollback as the safety net it is — an abandoned transaction still means
+the request's writes are discarded, and the warning in the server log
+is telling you the script has a bug.
 
 ---
 
