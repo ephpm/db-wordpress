@@ -218,6 +218,23 @@ class Db extends \wpdb
             $num_rows = 0;
 
             foreach ($this->bridgeRows ?? [] as $row) {
+                /*
+                 * Match stock wpdb's typing contract exactly: mysqli
+                 * returns EVERY scalar column as a string (mysqlnd only
+                 * types natively under MYSQLI_OPT_INT_AND_FLOAT_NATIVE,
+                 * which wpdb never sets). The bridge hands us native
+                 * int/float, so stringify them here — core and plugins
+                 * strict-compare against string values (e.g.
+                 * `'0' === get_comments_number()` in the comments-title
+                 * block) and native types break those paths. NULL stays
+                 * null, as it does under mysqli. Floats use PHP's default
+                 * float-to-string conversion.
+                 */
+                foreach ($row as $col => $value) {
+                    if (null !== $value && !\is_string($value)) {
+                        $row[$col] = (string) $value;
+                    }
+                }
                 $this->last_result[$num_rows] = (object) $row;
                 ++$num_rows;
             }

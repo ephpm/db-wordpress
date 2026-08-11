@@ -166,9 +166,17 @@ on the state this class populates.
 | mysqli pass-through (`$wpdb->dbh`, `mysqli_result` access) | **not supported** — `$dbh` is always `null`; code that reaches into it for raw mysqli calls will not work |
 | `get_col_length()` | **degraded** — always returns `false` (no `SHOW FULL COLUMNS` interrogation), so core skips its PHP-side length truncation. SQLite does not enforce `VARCHAR(n)` lengths anyway |
 
-Native types survive the bridge: integer columns arrive as PHP `int`,
-floats as `float`, `NULL` as `null` — same as mysqlnd with default
-settings.
+**Result typing matches stock wpdb: every scalar column is a string.**
+mysqli returns all scalars as strings unless
+`MYSQLI_OPT_INT_AND_FLOAT_NATIVE` is set — and wpdb never sets it — so
+core and plugins strict-compare against string values (core's
+comments-title block does `'0' === get_comments_number()`, for
+example). The bridge itself hands back native `int`/`float`, and the
+drop-in deliberately stringifies them during row hydration to preserve
+that contract; `NULL` stays `null`, exactly as under mysqli. Floats use
+PHP's default float-to-string conversion. Exposing the bridge's native
+typing could become an explicit opt-in in a future release — it is not
+implemented today.
 
 ---
 
@@ -332,7 +340,9 @@ database via the embed SAPI. [ephpm#257](https://github.com/ephpm/ephpm/pull/257
 registered two host functions into PHP's global function table:
 
 - `ephpm_db_query(string $sql, array $params = []): array` — rows as a
-  list of associative arrays; int/float/null arrive as native PHP types.
+  list of associative arrays; int/float/null arrive as native PHP types
+  (which the drop-in stringifies during hydration to match stock wpdb —
+  see [What is implemented](#what-is-implemented)).
 - `ephpm_db_execute(string $sql, array $params = []): array` —
   `{affected_rows, last_insert_id}`.
 

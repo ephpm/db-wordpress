@@ -120,17 +120,17 @@ final class DbTest extends TestCase
         $this->assertCount(1, $objects);
         $this->assertInstanceOf(\stdClass::class, $objects[0]);
         $this->assertSame('widget', $objects[0]->name);
-        $this->assertSame(1, $objects[0]->id);       // Native int, not "1".
-        $this->assertSame(3, $objects[0]->qty);
-        $this->assertSame(1.5, $objects[0]->price);  // Native float.
-        $this->assertNull($objects[0]->note);        // SQL NULL -> null.
+        $this->assertSame('1', $objects[0]->id);      // String, like mysqli.
+        $this->assertSame('3', $objects[0]->qty);
+        $this->assertSame('1.5', $objects[0]->price); // String, like mysqli.
+        $this->assertNull($objects[0]->note);         // SQL NULL -> null.
         $this->assertSame(1, $db->num_rows);
 
         $assoc = $db->get_results('SELECT id, name FROM wp_items', ARRAY_A);
-        $this->assertSame([['id' => 1, 'name' => 'widget']], $assoc);
+        $this->assertSame([['id' => '1', 'name' => 'widget']], $assoc);
 
         $numeric = $db->get_results('SELECT id, name FROM wp_items', ARRAY_N);
-        $this->assertSame([[1, 'widget']], $numeric);
+        $this->assertSame([['1', 'widget']], $numeric);
     }
 
     public function testGetRowGetVarGetCol(): void
@@ -144,9 +144,9 @@ final class DbTest extends TestCase
         $this->assertSame('widget', $row->name);
 
         $rowA = $db->get_row('SELECT name, qty FROM wp_items ORDER BY id LIMIT 1', ARRAY_A);
-        $this->assertSame(['name' => 'widget', 'qty' => 3], $rowA);
+        $this->assertSame(['name' => 'widget', 'qty' => '3'], $rowA);
 
-        $this->assertSame(10, $db->get_var('SELECT SUM(qty) FROM wp_items'));
+        $this->assertSame('10', $db->get_var('SELECT SUM(qty) FROM wp_items'));
         $this->assertSame(['widget', 'gadget'], $db->get_col('SELECT name FROM wp_items ORDER BY id'));
         $this->assertNull($db->get_var('SELECT name FROM wp_items WHERE qty = 999'));
     }
@@ -242,7 +242,32 @@ final class DbTest extends TestCase
         $this->assertStringContainsString('`wp_items`', $sql);
         $this->assertStringContainsString("'it\\'s'", $sql);
 
-        $this->assertSame(5, $db->get_var($sql));
+        $this->assertSame('5', $db->get_var($sql));
+    }
+
+    /**
+     * Regression: stock wpdb returns every scalar column as a string
+     * (mysqli without MYSQLI_OPT_INT_AND_FLOAT_NATIVE, which wpdb never
+     * sets). Core strict-compares against those strings — e.g. the
+     * comments-title block does `'0' === get_comments_number()` — so
+     * native int/float hydration renders wrong output. NULL must stay
+     * null, exactly as under mysqli.
+     */
+    public function testScalarColumnsComeBackAsStringsLikeStockWpdb(): void
+    {
+        $db = $this->makeDbWithTable();
+        $db->insert('wp_items', ['name' => 'post']);
+
+        $count = $db->get_var(
+            "SELECT COUNT(*) FROM wp_items WHERE name = 'no-such-comment'"
+        );
+        $this->assertSame('0', $count);
+        $this->assertTrue('0' === $count); // The comments-title comparison.
+
+        // Non-integral float: PHP's default float-to-string conversion.
+        $db->insert('wp_items', ['name' => 'priced', 'qty' => 7, 'price' => 2.25], ['%s', '%d', '%f']);
+        $row = $db->get_row("SELECT qty, price, note FROM wp_items WHERE name = 'priced'", ARRAY_A);
+        $this->assertSame(['qty' => '7', 'price' => '2.25', 'note' => null], $row);
     }
 
     public function testPreparedLikeWithEscapedPercentLiteral(): void
@@ -302,12 +327,12 @@ final class DbTest extends TestCase
         $db->query('BEGIN');
         $db->insert('wp_items', ['name' => 'temp']);
         $db->query('ROLLBACK');
-        $this->assertSame(0, $db->get_var('SELECT COUNT(*) FROM wp_items'));
+        $this->assertSame('0', $db->get_var('SELECT COUNT(*) FROM wp_items'));
 
         $db->query('BEGIN');
         $db->insert('wp_items', ['name' => 'kept']);
         $db->query('COMMIT');
-        $this->assertSame(1, $db->get_var('SELECT COUNT(*) FROM wp_items'));
+        $this->assertSame('1', $db->get_var('SELECT COUNT(*) FROM wp_items'));
     }
 
     public function testLeadingCommentRouting(): void
