@@ -1,0 +1,43 @@
+{
+    "name": "ephpm/db-wordpress",
+    "description": "WordPress database drop-in (wp-content/db.php) backed by ePHPm's in-process DB bridge via the ephpm_db_query()/ephpm_db_execute() SAPI functions — wpdb without mysqli, no socket, SQLite underneath.",
+    "type": "wordpress-dropin",
+    "license": "MIT",
+    "keywords": ["wordpress", "database", "wpdb", "ephpm", "sqlite", "sapi", "dropin"],
+    "homepage": "https://ephpm.dev",
+    "support": {
+        "issues": "https://github.com/ephpm/db-wordpress/issues",
+        "source": "https://github.com/ephpm/db-wordpress"
+    },
+    "require": {
+        "php": "^8.2"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5 || ^11.0",
+        "roots/wordpress-core-installer": "^1.100",
+        "roots/wordpress-no-content": "^6.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ephpm\\Db\\WordPress\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ephpm\\Db\\WordPress\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "wordpress-install-dir": "wordpress"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "roots/wordpress-core-installer": true
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "minimum-stability": "stable"
+}
