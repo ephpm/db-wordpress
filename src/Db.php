@@ -600,16 +600,31 @@ class Db extends \wpdb
             return $sql;
         }
 
-        if (preg_match('/\bCONVERT\s+TO\s+CHARACTER\s+SET\b/is', $trimmed)) {
-            return 'SELECT 1';
-        }
-
-        // `DROP PRIMARY KEY` (usually paired with re-adding a PRIMARY/UNIQUE
-        // KEY) cannot be expressed in SQLite at all — the key is part of the
-        // CREATE TABLE. These statements are idempotent schema-normalisation
-        // upgrades (WooCommerce's order-lookup / sessions / downloadable
-        // permissions tables) whose target key already exists, so no-op them.
-        if (preg_match('/\bDROP\s+PRIMARY\s+KEY\b/is', $trimmed)) {
+        /*
+         * The only ALTER TABLE operations SQLite supports are ADD COLUMN,
+         * DROP COLUMN and RENAME (COLUMN|TO). Every other MySQL ALTER
+         * operation — key/index management, charset conversion, column
+         * re-typing and column-default changes — is impossible after CREATE
+         * TABLE. WordPress core's dbDelta and WooCommerce's schema
+         * reconciliation emit these one operation per statement to sync an
+         * existing table to its declared shape; because the embedded engine
+         * fixed those very properties at CREATE time, the operations are
+         * idempotent no-ops. Rewrite the statement to `SELECT 1` so it
+         * succeeds without a parse error rather than aborting the migration.
+         *
+         * Each marker is a distinct operation keyword, so it never fires on a
+         * plain `ADD COLUMN name TYPE` (which has no such keyword after ADD).
+         */
+        $unsupportedOp = '/'
+            . '\bCONVERT\s+TO\s+CHARACTER\s+SET\b'          // charset conversion
+            . '|\bDROP\s+PRIMARY\s+KEY\b'                   // drop PK
+            . '|\bADD\s+PRIMARY\s+KEY\b'                    // add PK
+            . '|\bADD\s+(?:UNIQUE\s+|FULLTEXT\s+|SPATIAL\s+)?(?:KEY|INDEX)\b'  // add index
+            . '|\bDROP\s+(?:KEY|INDEX)\b'                   // drop index
+            . '|\bADD\s+CONSTRAINT\b'                       // add constraint / FK
+            . '|\bALTER\s+(?:COLUMN\s+)?`?[A-Za-z_][A-Za-z0-9_]*`?\s+(?:SET|DROP)\s+DEFAULT\b'  // column default change
+            . '/is';
+        if (preg_match($unsupportedOp, $trimmed)) {
             return 'SELECT 1';
         }
 

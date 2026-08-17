@@ -82,6 +82,41 @@ final class TranslateDdlTest extends TestCase
         $this->assertSame($sql, Db::translateMysqlToBridge($sql));
     }
 
+    public function testStandaloneAddPrimaryKeyIsNoop(): void
+    {
+        $this->assertSame(
+            'SELECT 1',
+            Db::translateMysqlToBridge('ALTER TABLE wp_woocommerce_sessions ADD PRIMARY KEY (`session_id`)')
+        );
+    }
+
+    public function testAddIndexIsNoop(): void
+    {
+        $this->assertSame('SELECT 1', Db::translateMysqlToBridge('ALTER TABLE wp_x ADD KEY idx_name (name)'));
+        $this->assertSame('SELECT 1', Db::translateMysqlToBridge('ALTER TABLE wp_x ADD UNIQUE KEY uq (sku)'));
+    }
+
+    public function testAlterColumnSetDefaultIsNoop(): void
+    {
+        $this->assertSame(
+            'SELECT 1',
+            Db::translateMysqlToBridge("ALTER TABLE wp_wc_product_meta_lookup ALTER COLUMN `stock_status` SET DEFAULT 'instock'")
+        );
+        $this->assertSame(
+            'SELECT 1',
+            Db::translateMysqlToBridge('ALTER TABLE wp_x ALTER COLUMN qty DROP DEFAULT')
+        );
+    }
+
+    public function testAddColumnNamedAfterKeywordStillPasses(): void
+    {
+        // A plain column add must never be mistaken for an index/key op.
+        $sql = 'ALTER TABLE wp_x ADD COLUMN indexed_at datetime';
+        $this->assertSame($sql, Db::translateMysqlToBridge($sql));
+        $sql2 = 'ALTER TABLE wp_x ADD `primary_email` varchar(100)';
+        $this->assertSame($sql2, Db::translateMysqlToBridge($sql2));
+    }
+
     // ── INFORMATION_SCHEMA index probe ──────────────────────────────────
 
     public function testInformationSchemaStatisticsProbeReturnsOne(): void
