@@ -485,13 +485,22 @@ class Db extends \wpdb
 
     /**
      * MySQL-style string escaping without mysqli. The SQL produced still
-     * goes through litewire's MySQL-dialect parser, which decodes
-     * backslash escapes exactly as a MySQL server would, so escape the
-     * way mysql_real_escape_string() does: NUL, \n, \r, \, ', " and
-     * Ctrl-Z become backslash sequences.
+     * goes through litewire's MySQL-dialect parser, which decodes backslash
+     * escapes as a MySQL server would (`\n`, `\r`, `\0`, Ctrl-Z as `\Z`,
+     * `\\`, `\"`), so those specials become backslash sequences — matching
+     * mysql_real_escape_string() and covering what core's non-mysqli
+     * addslashes() fallback misses (`\n`, `\r`, NUL, Ctrl-Z).
      *
-     * Core's non-mysqli fallback is addslashes(), which misses \n, \r,
-     * NUL and Ctrl-Z — that's why this override exists.
+     * The **single quote is the exception**: it is doubled (`''`), not
+     * backslash-escaped (`\'`). litewire's tenant-path parser rejects a
+     * backslash-escaped single quote — `'O\'Reilly'` fails with
+     * "statement type `malformed SQL` is not permitted" — whereas `''` is
+     * accepted by both MySQL and SQLite/Turso. Any WordPress content with
+     * an apostrophe (e.g. the twentytwentyfive theme's block-pattern
+     * transient, which 500s the installer) hits this. Doubling is
+     * unambiguous here because backslashes are still doubled, so a string
+     * can never be broken out of. See
+     * https://github.com/ephpm/db-wordpress/issues/1.
      *
      * @param string $data String to escape.
      * @return string Escaped string.
@@ -507,7 +516,7 @@ class Db extends \wpdb
             "\n" => '\\n',
             "\r" => '\\r',
             '\\' => '\\\\',
-            "'" => "\\'",
+            "'" => "''",
             '"' => '\\"',
             "\x1a" => '\\Z',
         ]);

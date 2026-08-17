@@ -153,7 +153,7 @@ on the state this class populates.
 | `last_error` | **populated** in-band from caught bridge exceptions (`SQLSTATE[xxxxx]: <message>`); exceptions never escape into calling code. The MySQL errno is additionally exposed via `Db::last_errno()` |
 | `db_connect()`, `check_connection()` | **reimplemented** as no-ops — there is no socket to open or lose; `$wpdb->dbh` stays `null` for the object's life |
 | `db_server_info()` | **reimplemented** — `SELECT VERSION()` through the bridge (litewire answers `8.0.0-litewire`), cached; same-string fallback if the query fails. `db_version()` is inherited on top and yields `8.0.0` |
-| `_real_escape()` | **reimplemented** — `mysql_real_escape_string()`-equivalent escaping in PHP (NUL, `\n`, `\r`, `\`, `'`, `"`, Ctrl-Z), no mysqli. litewire's MySQL-dialect parser decodes these exactly as a MySQL server would |
+| `_real_escape()` | **reimplemented** — `mysql_real_escape_string()`-style escaping in PHP (NUL, `\n`, `\r`, `\`, `"`, Ctrl-Z as backslash sequences), no mysqli, which litewire's MySQL-dialect parser decodes as a MySQL server would. **The single quote is doubled (`''`), not backslash-escaped (`\'`)** — litewire's tenant path rejects `\'` as malformed SQL (issue #1). See [Behavior notes](#behavior-notes-and-limitations). |
 | `select()`, `set_charset()`, `set_sql_mode()` | **no-ops** — one database, no handle; litewire already answers `SET sql_mode` with an OK |
 | `get_table_charset()`, `get_col_charset()` | **reimplemented** — constant `utf8mb4` (SQLite TEXT is UTF-8), keeping core's invalid-text stripping on its pure-PHP path instead of `SHOW FULL COLUMNS` + `CONVERT()` SQL |
 | `load_col_info()` | **reimplemented** — column names synthesized from the last rowset; see limitations |
@@ -215,12 +215,20 @@ The differences this package's authors have actually verified:
   of `wp-content/db.php` — core only demands mysqli when there is no
   drop-in.
 
-### MySQL-only DML the drop-in rewrites
+### MySQL-only SQL the drop-in adapts for the embedded engine
 
-Two MySQL-specific DML constructs WordPress core emits have no litewire
-translation and the embedded engine (Turso) rejects them, so the drop-in
-rewrites them at the bridge boundary before dispatch (`last_query`, the
-SAVEQUERIES log and the `query` filter still see the original text):
+Three things WordPress core emits are not accepted by the embedded engine
+(litewire → Turso) as MySQL would accept them. The first is handled in
+`_real_escape()` (above): **single quotes are doubled (`''`) rather than
+backslash-escaped (`\'`)**, because litewire's tenant path rejects `\'` as
+malformed SQL — which otherwise 500s the installer as soon as any content
+with an apostrophe is written (e.g. the twentytwentyfive block-pattern
+transient).
+
+The other two are MySQL-specific DML constructs with no litewire
+translation; the drop-in rewrites them at the bridge boundary before
+dispatch (`last_query`, the SAVEQUERIES log and the `query` filter still
+see the original text):
 
 - **`INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col), …`** →
   **`INSERT OR REPLACE INTO …`**. WordPress only uses this clause to

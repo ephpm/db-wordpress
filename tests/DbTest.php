@@ -241,7 +241,9 @@ final class DbTest extends TestCase
             2.25
         );
         $this->assertStringContainsString('`wp_items`', $sql);
-        $this->assertStringContainsString("'it\\'s'", $sql);
+        // Single quotes are doubled ('') — litewire's tenant path rejects
+        // the backslash form ('it\'s'). See testSingleQuoteIsDoubledNotBackslashed.
+        $this->assertStringContainsString("'it''s'", $sql);
 
         $this->assertSame('5', $db->get_var($sql));
     }
@@ -282,6 +284,33 @@ final class DbTest extends TestCase
             $db->esc_like('widget-') . '%'
         );
         $this->assertSame(['widget-blue'], $db->get_col($sql));
+    }
+
+    /**
+     * Regression (issue #1): litewire's tenant-path parser rejects a
+     * backslash-escaped single quote (`'O\'Reilly'` → "malformed SQL"), so
+     * `_real_escape()` must double the quote (`''`) instead. Backslashes are
+     * still doubled, so the escaping stays unambiguous.
+     */
+    public function testSingleQuoteIsDoubledNotBackslashed(): void
+    {
+        $db = $this->makeDb();
+
+        $escaped = $db->_real_escape("O'Reilly");
+        $this->assertStringContainsString("O''Reilly", $escaped);
+        $this->assertStringNotContainsString("O\\'Reilly", $escaped);
+
+        // A backslash immediately before a quote stays unambiguous: the
+        // backslash is doubled and the quote is doubled.
+        $this->assertStringContainsString("\\\\''", $db->_real_escape("\\'"));
+
+        // And it still round-trips through the bridge.
+        $db->query('CREATE TABLE wp_q (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)');
+        $db->query($db->prepare('INSERT INTO wp_q (v) VALUES (%s)', "it's a \"trap\" — O'Reilly"));
+        $this->assertSame(
+            "it's a \"trap\" — O'Reilly",
+            $db->get_var($db->prepare('SELECT v FROM wp_q WHERE id = %d', $db->insert_id))
+        );
     }
 
     // ── Multi-byte and invalid-byte handling ────────────────────────────
