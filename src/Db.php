@@ -341,7 +341,6 @@ class Db extends \wpdb
         $sql = self::rewriteMultiTableDelete($sql);
         $sql = self::rewriteAliasJoinDelete($sql);
         $sql = self::rewriteTruncate($sql);
-        $sql = self::rewriteUpdateDeleteOrderLimit($sql);
         $sql = self::stripOnUpdateCurrentTimestamp($sql);
         $sql = self::rewriteUnsupportedAlter($sql);
         $sql = self::rewriteInformationSchemaIndexProbe($sql);
@@ -546,53 +545,6 @@ class Db extends \wpdb
         return 'DELETE FROM ' . $m[2]
             . ' WHERE rowid IN (SELECT ' . $m[3] . '.rowid FROM '
             . $m[2] . ' ' . $m[3] . $m[4] . ')';
-    }
-
-    /**
-     * MySQL's `UPDATE`/`DELETE … [ORDER BY …] LIMIT n` (a MySQL extension)
-     * is rewritten to the portable `… WHERE rowid IN (SELECT rowid FROM t
-     * [WHERE …] [ORDER BY …] LIMIT n)` form. The embedded engine is not
-     * built with `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so it rejects a
-     * trailing LIMIT on a mutation. ActionScheduler's queue runner (bundled
-     * by WooCommerce / WPForms) claims a batch with exactly this shape:
-     * `UPDATE wp_posts SET … WHERE … ORDER BY … LIMIT 25`.
-     *
-     * Only single-table `UPDATE <t> SET …` / `DELETE FROM <t>` statements
-     * that end in `LIMIT <n>` are touched; everything else is returned
-     * unchanged. The inner SELECT re-uses the outer WHERE/ORDER BY verbatim.
-     */
-    public static function rewriteUpdateDeleteOrderLimit(string $sql): string
-    {
-        if (!preg_match('/\bLIMIT\s+\d+\s*;?\s*$/is', $sql)) {
-            return $sql;
-        }
-
-        // UPDATE <t> SET <assignments> [WHERE <cond>] [ORDER BY <ord>] LIMIT <n>
-        if (preg_match(
-            '/^\s*UPDATE\s+(`?[\w.]+`?)\s+SET\s+(.*?)'
-            . '(\s+WHERE\s+.*?)?(\s+ORDER\s+BY\s+.*?)?\s+LIMIT\s+(\d+)\s*;?\s*$/is',
-            $sql,
-            $m
-        )) {
-            [$table, $set, $where, $order, $limit] = [$m[1], $m[2], $m[3] ?? '', $m[4] ?? '', $m[5]];
-
-            return "UPDATE {$table} SET {$set} WHERE rowid IN (SELECT rowid FROM {$table}"
-                . $where . $order . " LIMIT {$limit})";
-        }
-
-        // DELETE FROM <t> [WHERE <cond>] [ORDER BY <ord>] LIMIT <n>
-        if (preg_match(
-            '/^\s*DELETE\s+FROM\s+(`?[\w.]+`?)(\s+WHERE\s+.*?)?(\s+ORDER\s+BY\s+.*?)?\s+LIMIT\s+(\d+)\s*;?\s*$/is',
-            $sql,
-            $m
-        )) {
-            [$table, $where, $order, $limit] = [$m[1], $m[2] ?? '', $m[3] ?? '', $m[4]];
-
-            return "DELETE FROM {$table} WHERE rowid IN (SELECT rowid FROM {$table}"
-                . $where . $order . " LIMIT {$limit})";
-        }
-
-        return $sql;
     }
 
     /**
