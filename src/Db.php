@@ -338,6 +338,11 @@ class Db extends \wpdb
     {
         $sql = self::rewriteOnDuplicateKeyUpdate($sql);
         $sql = self::rewriteMultiTableDelete($sql);
+        $sql = self::rewriteAliasJoinDelete($sql);
+        $sql = self::rewriteTruncate($sql);
+        $sql = self::stripOnUpdateCurrentTimestamp($sql);
+        $sql = self::rewriteUnsupportedAlter($sql);
+        $sql = self::stripFromDual($sql);
 
         return $sql;
     }
@@ -470,6 +475,118 @@ class Db extends \wpdb
 
         return "DELETE FROM {$outerTable} WHERE rowid IN ("
             . implode(' UNION ', $selects) . ')';
+    }
+
+    /**
+     * `DELETE <alias> FROM <table> <alias> <join…> WHERE …` — the
+     * single-target MySQL multi-table delete (one delete target, joined to
+     * one or more other references), as Yoast SEO's indexable de-duplication
+     * emits (`DELETE wyi FROM wp_yoast_indexable wyi INNER JOIN
+     * wp_yoast_indexable wyi2 WHERE …`).
+     *
+     * → `DELETE FROM <table> WHERE rowid IN (SELECT <alias>.rowid FROM
+     *    <table> <alias> <join…> WHERE …)`.
+     *
+     * The delete-target alias must be the alias bound to the immediately
+     * following base table; otherwise the statement is returned unchanged.
+     * The comma-separated multi-target shape is handled by
+     * {@see Db::rewriteMultiTableDelete()} and runs first.
+     */
+    public static function rewriteAliasJoinDelete(string $sql): string
+    {
+        if (!preg_match(
+            '/^\s*DELETE\s+(`?\w+`?)\s+FROM\s+(`?[\w.]+`?)\s+(`?\w+`?)\b(.*)$/is',
+            $sql,
+            $m
+        )) {
+            return $sql;
+        }
+
+        $targetAlias = trim($m[1], '`');
+        $tableAlias = trim($m[3], '`');
+        if (0 !== strcasecmp($targetAlias, $tableAlias)) {
+            return $sql;
+        }
+
+        return 'DELETE FROM ' . $m[2]
+            . ' WHERE rowid IN (SELECT ' . $m[3] . '.rowid FROM '
+            . $m[2] . ' ' . $m[3] . $m[4] . ')';
+    }
+
+    /**
+     * `TRUNCATE [TABLE] <t>` → `DELETE FROM <t>`. SQLite has no TRUNCATE;
+     * plugins (Yoast SEO's reset routines) use it to empty their tables.
+     */
+    public static function rewriteTruncate(string $sql): string
+    {
+        if (preg_match('/^\s*TRUNCATE\s+(?:TABLE\s+)?(`?[A-Za-z0-9_.]+`?)\s*;?\s*$/is', $sql, $m)) {
+            return 'DELETE FROM ' . $m[1];
+        }
+
+        return $sql;
+    }
+
+    /**
+     * Strip the MySQL `ON UPDATE CURRENT_TIMESTAMP` column attribute (with
+     * optional fractional-seconds precision). SQLite has no auto-update
+     * timestamp; the `DEFAULT CURRENT_TIMESTAMP` it follows is accepted
+     * as-is by the embedded engine. Applies to CREATE and ALTER column
+     * definitions alike (Yoast SEO's `created_at`/`updated_at` columns).
+     */
+    public static function stripOnUpdateCurrentTimestamp(string $sql): string
+    {
+        $out = preg_replace(
+            '/\s+ON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d*\s*\))?/i',
+            '',
+            $sql
+        );
+
+        return \is_string($out) ? $out : $sql;
+    }
+
+    /**
+     * No-op the MySQL-only `ALTER TABLE` forms SQLite cannot perform:
+     *
+     *  - `ALTER TABLE … CONVERT TO CHARACTER SET …` — charset is fixed
+     *    (SQLite TEXT is UTF-8), so the conversion is meaningless.
+     *  - `ALTER TABLE <t> CHANGE|MODIFY …` (when the statement is exclusively
+     *    column re-typing, i.e. contains no ADD/DROP clause) — SQLite cannot
+     *    change a column's type or name in place, and its dynamic typing
+     *    makes the declared type cosmetic, so the existing column stands.
+     *
+     * Both are common in plugin schema-normalisation passes (Yoast SEO,
+     * ActionScheduler bundled by WPForms/WooCommerce). Rewritten to
+     * `SELECT 1` so the statement succeeds without altering anything.
+     */
+    public static function rewriteUnsupportedAlter(string $sql): string
+    {
+        $trimmed = ltrim($sql);
+
+        if (preg_match('/^ALTER\s+TABLE\s+.+?\bCONVERT\s+TO\s+CHARACTER\s+SET\b/is', $trimmed)) {
+            return 'SELECT 1';
+        }
+
+        if (
+            preg_match('/^ALTER\s+TABLE\s+\S+\s+(?:CHANGE|MODIFY)\b/is', $trimmed)
+            && !preg_match('/\b(?:ADD|DROP)\s/i', $trimmed)
+        ) {
+            return 'SELECT 1';
+        }
+
+        return $sql;
+    }
+
+    /**
+     * Drop the MySQL `FROM dual` dummy table. A `SELECT … WHERE …` with no
+     * FROM clause is valid SQLite, so `… FROM dual WHERE …` becomes
+     * `… WHERE …`. ActionScheduler's idempotent insert
+     * (`INSERT … SELECT … FROM dual WHERE NOT EXISTS (…)`) relies on it.
+     */
+    public static function stripFromDual(string $sql): string
+    {
+        $out = preg_replace('/\bFROM\s+dual\b/i', '', $sql);
+
+        return \is_string($out) ? $out : $sql;
     }
 
     /**
