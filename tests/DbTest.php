@@ -6,6 +6,7 @@ namespace Ephpm\Db\WordPress\Tests;
 
 use Ephpm\Db\WordPress\Db;
 use Ephpm\Db\WordPress\PdoSqliteDbOps;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -376,5 +377,146 @@ final class DbTest extends TestCase
         $this->assertSame(0, $db->num_rows);
         $this->assertNull($db->last_query);
         $this->assertSame('', $db->last_error);
+    }
+
+    // ── MySQL-only DML rewrites (issue #1) ──────────────────────────────
+
+    /**
+     * `INSERT ... ON DUPLICATE KEY UPDATE col = VALUES(col)` — the shape
+     * `add_option()` emits — becomes an `INSERT OR REPLACE` upsert. The
+     * embedded engine does not honour `ON CONFLICT ... DO UPDATE`, so
+     * REPLACE is the portable equivalent for these full-overwrite clauses.
+     */
+    public function testOnDuplicateKeyUpdateUpsertsViaReplace(): void
+    {
+        $db = $this->makeDb();
+        $db->query(
+            'CREATE TABLE wp_options ('
+            . 'option_id INTEGER PRIMARY KEY AUTOINCREMENT, '
+            . 'option_name TEXT, option_value TEXT, autoload TEXT, '
+            . 'UNIQUE (option_name))'
+        );
+
+        $first = $db->query(
+            "INSERT INTO wp_options (option_name, option_value, autoload) "
+            . "VALUES ('siteurl', 'v1', 'yes') "
+            . 'ON DUPLICATE KEY UPDATE option_name = VALUES(option_name), '
+            . 'option_value = VALUES(option_value), autoload = VALUES(autoload)'
+        );
+        $this->assertNotFalse($first);
+
+        // Conflicting option_name overwrites the row instead of erroring.
+        $second = $db->query(
+            "INSERT INTO wp_options (option_name, option_value, autoload) "
+            . "VALUES ('siteurl', 'v2', 'no') "
+            . 'ON DUPLICATE KEY UPDATE option_name = VALUES(option_name), '
+            . 'option_value = VALUES(option_value), autoload = VALUES(autoload)'
+        );
+        $this->assertNotFalse($second);
+        $this->assertSame('', $db->last_error);
+
+        $this->assertSame('1', $db->get_var('SELECT COUNT(*) FROM wp_options'));
+        $this->assertSame(
+            'v2',
+            $db->get_var("SELECT option_value FROM wp_options WHERE option_name = 'siteurl'")
+        );
+    }
+
+    /**
+     * The MySQL multi-table `DELETE a, b FROM t a, t b WHERE ...` that
+     * `delete_expired_transients()` runs is rewritten to a rowid subquery
+     * that removes every row participating as either alias.
+     */
+    public function testMultiTableDeleteRemovesBothAliasRows(): void
+    {
+        $db = $this->makeDb();
+        $db->query(
+            'CREATE TABLE wp_options ('
+            . 'option_id INTEGER PRIMARY KEY AUTOINCREMENT, '
+            . 'option_name TEXT, option_value TEXT)'
+        );
+        // Expired transient: value row + timeout row (timeout in the past).
+        $db->query("INSERT INTO wp_options (option_name, option_value) VALUES ('_transient_foo', 'payload')");
+        $db->query("INSERT INTO wp_options (option_name, option_value) VALUES ('_transient_timeout_foo', '100')");
+        // Live transient: timeout far in the future.
+        $db->query("INSERT INTO wp_options (option_name, option_value) VALUES ('_transient_bar', 'payload')");
+        $db->query("INSERT INTO wp_options (option_name, option_value) VALUES ('_transient_timeout_bar', '9999999999')");
+        // Unrelated option, must survive.
+        $db->query("INSERT INTO wp_options (option_name, option_value) VALUES ('siteurl', 'http://example.test')");
+
+        // SQLite-native `||`/`substr` stand in for the MySQL
+        // CONCAT()/SUBSTRING() litewire translates in production; the point
+        // under test is the multi-table DELETE syntax rewrite.
+        $deleted = $db->query(
+            'DELETE a, b FROM wp_options a, wp_options b '
+            . "WHERE a.option_name LIKE '_transient_%' "
+            . "AND a.option_name NOT LIKE '_transient_timeout_%' "
+            . "AND b.option_name = '_transient_timeout_' || substr(a.option_name, 12) "
+            . 'AND b.option_value < 500'
+        );
+
+        $this->assertSame(2, $deleted);
+        $this->assertSame(
+            ['_transient_bar', '_transient_timeout_bar', 'siteurl'],
+            $db->get_col('SELECT option_name FROM wp_options ORDER BY option_name')
+        );
+    }
+
+    // ── MySQL-only DML rewrites: the translator in isolation ────────────
+
+    public function testTranslateOnDuplicateKeyUpdateToReplace(): void
+    {
+        $in = 'INSERT INTO `wp_options` (`option_name`, `option_value`, `autoload`) '
+            . "VALUES ('siteurl', 'v', 'yes') "
+            . 'ON DUPLICATE KEY UPDATE `option_name` = VALUES(`option_name`), '
+            . '`option_value` = VALUES(`option_value`), `autoload` = VALUES(`autoload`)';
+
+        $this->assertSame(
+            'INSERT OR REPLACE INTO `wp_options` (`option_name`, `option_value`, `autoload`) '
+            . "VALUES ('siteurl', 'v', 'yes')",
+            Db::translateMysqlToBridge($in)
+        );
+    }
+
+    public function testTranslateIgnoresOnDuplicatePhraseInsideLiteral(): void
+    {
+        $in = "INSERT INTO t (a) VALUES ('x ON DUPLICATE KEY UPDATE y') "
+            . 'ON DUPLICATE KEY UPDATE a = VALUES(a)';
+
+        $this->assertSame(
+            "INSERT OR REPLACE INTO t (a) VALUES ('x ON DUPLICATE KEY UPDATE y')",
+            Db::translateMysqlToBridge($in)
+        );
+    }
+
+    public function testTranslateMultiTableDeleteToRowidSubquery(): void
+    {
+        $in = 'DELETE a, b FROM wp_options a, wp_options b '
+            . 'WHERE a.option_id < b.option_id';
+
+        $this->assertSame(
+            'DELETE FROM wp_options WHERE rowid IN ('
+            . 'SELECT a.rowid FROM wp_options a, wp_options b WHERE a.option_id < b.option_id'
+            . ' UNION '
+            . 'SELECT b.rowid FROM wp_options a, wp_options b WHERE a.option_id < b.option_id)',
+            Db::translateMysqlToBridge($in)
+        );
+    }
+
+    #[DataProvider('ordinaryStatements')]
+    public function testTranslateLeavesOrdinaryStatementsUnchanged(string $sql): void
+    {
+        $this->assertSame($sql, Db::translateMysqlToBridge($sql));
+    }
+
+    /** @return array<string, array{string}> */
+    public static function ordinaryStatements(): array
+    {
+        return [
+            'single-table delete' => ["DELETE FROM wp_options WHERE option_name = 'x'"],
+            'plain insert' => ["INSERT INTO wp_posts (post_title) VALUES ('hi')"],
+            'select with in-list' => ['SELECT * FROM wp_options WHERE option_id IN (1, 2, 3)'],
+            'update' => ["UPDATE wp_options SET option_value = 'y' WHERE option_name = 'x'"],
+        ];
     }
 }

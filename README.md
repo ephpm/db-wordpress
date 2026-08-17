@@ -215,6 +215,35 @@ The differences this package's authors have actually verified:
   of `wp-content/db.php` — core only demands mysqli when there is no
   drop-in.
 
+### MySQL-only DML the drop-in rewrites
+
+Two MySQL-specific DML constructs WordPress core emits have no litewire
+translation and the embedded engine (Turso) rejects them, so the drop-in
+rewrites them at the bridge boundary before dispatch (`last_query`, the
+SAVEQUERIES log and the `query` filter still see the original text):
+
+- **`INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col), …`** →
+  **`INSERT OR REPLACE INTO …`**. WordPress only uses this clause to
+  overwrite the conflicting row with the values just supplied
+  (`add_option()` on `wp_options`, `wp_set_object_terms()` on
+  `wp_term_relationships`), which is exactly SQLite's `REPLACE`
+  semantics. Turso does **not** honour `ON CONFLICT … DO UPDATE` (it
+  raises the `UNIQUE` violation instead of upserting), so `REPLACE` — not
+  an SQLite upsert — is the portable target. Caveat: `REPLACE` deletes
+  and re-inserts the row, so an `AUTOINCREMENT` surrogate key (e.g.
+  `wp_options.option_id`) is reassigned; core never addresses those rows
+  by that surrogate id, so this is transparent.
+- **`DELETE a, b FROM t a, t b WHERE …`** (MySQL multi-table `DELETE`,
+  used by `delete_expired_transients()`) → a single-table
+  `DELETE FROM t WHERE rowid IN (SELECT a.rowid … UNION SELECT b.rowid …)`.
+  Only the self-join shape core emits (every delete-target alias resolves
+  to the same base table) is rewritten; an ordinary single-table
+  `DELETE FROM t WHERE …` is passed through untouched.
+
+Both rewrites are exposed as pure, testable statics
+(`Db::translateMysqlToBridge()` and its two helpers). See
+[ephpm/db-wordpress#1](https://github.com/ephpm/db-wordpress/issues/1).
+
 ---
 
 ## Transactions

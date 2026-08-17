@@ -272,15 +272,20 @@ class Db extends \wpdb
         $this->bridgeErrno = 0;
         $this->bridgeColNames = [];
 
+        // Rewrite the MySQL-only DML WordPress core emits that the embedded
+        // engine rejects (multi-table DELETE, INSERT ... ON DUPLICATE KEY
+        // UPDATE). `last_query` and the 'query' filter keep the original.
+        $bridgeSql = self::translateMysqlToBridge($query);
+
         try {
-            if ($this->is_rowset_query($query)) {
-                $rows = $this->dbOps->query($query);
+            if ($this->is_rowset_query($bridgeSql)) {
+                $rows = $this->dbOps->query($bridgeSql);
                 $this->bridgeRows = $rows;
                 if (isset($rows[0])) {
                     $this->bridgeColNames = array_keys($rows[0]);
                 }
             } else {
-                $this->bridgeOk = $this->dbOps->execute($query);
+                $this->bridgeOk = $this->dbOps->execute($bridgeSql);
             }
         } catch (\Throwable $e) {
             $this->bridgeError = $e->getMessage();
@@ -313,6 +318,158 @@ class Db extends \wpdb
         }
 
         return (bool) preg_match('/^(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN|WITH|VALUES|TABLE)\b/i', $q);
+    }
+
+    // ── MySQL-dialect fix-ups the embedded engine can't do ───────────────
+
+    /**
+     * Rewrite the two MySQL-only DML constructs WordPress core emits that
+     * the embedded engine (litewire → Turso) will not execute, into forms
+     * both Turso and `pdo_sqlite` accept. Everything else — including the
+     * MySQL functions litewire already translates (CONCAT, SUBSTRING,
+     * REGEXP, LIKE) and backtick identifiers — is passed through
+     * untouched.
+     *
+     * Applied at the bridge boundary only (see {@see Db::_do_query()}), so
+     * `last_query`, the SAVEQUERIES log and the 'query' filter all still
+     * observe the original MySQL text.
+     */
+    public static function translateMysqlToBridge(string $sql): string
+    {
+        $sql = self::rewriteOnDuplicateKeyUpdate($sql);
+        $sql = self::rewriteMultiTableDelete($sql);
+
+        return $sql;
+    }
+
+    /**
+     * `INSERT ... ON DUPLICATE KEY UPDATE col = VALUES(col), ...`
+     * → `INSERT OR REPLACE INTO ...` (the ON DUPLICATE clause dropped).
+     *
+     * WordPress only ever uses ON DUPLICATE KEY UPDATE to overwrite the
+     * conflicting row with the values just supplied — every assignment is
+     * `col = VALUES(col)` (add_option's options upsert, set_object_terms'
+     * term_relationships upsert) — which is exactly SQLite's REPLACE
+     * semantics. Turso does **not** honour `ON CONFLICT ... DO UPDATE`
+     * (it raises the UNIQUE violation instead of upserting), so REPLACE —
+     * not an SQLite upsert — is the portable target that works on both
+     * Turso and pdo_sqlite.
+     *
+     * The clause is matched on its LAST occurrence (greedy prefix) so a
+     * literal containing the phrase "ON DUPLICATE KEY UPDATE" inside the
+     * inserted VALUES is never mistaken for the real clause.
+     *
+     * Caveat: REPLACE deletes and re-inserts the conflicting row, so an
+     * AUTOINCREMENT surrogate key (e.g. wp_options.option_id) is
+     * reassigned. WordPress addresses options by option_name and terms by
+     * (object_id, term_taxonomy_id), never by those surrogate ids, so this
+     * is transparent to core.
+     */
+    public static function rewriteOnDuplicateKeyUpdate(string $sql): string
+    {
+        if (!preg_match('/\bON\s+DUPLICATE\s+KEY\s+UPDATE\b/i', $sql)) {
+            return $sql;
+        }
+        if (!preg_match('/^\s*INSERT\b/i', $sql)) {
+            return $sql;
+        }
+
+        // Drop the trailing ON DUPLICATE KEY UPDATE ... clause. The greedy
+        // `(.*)` prefix anchors on the last occurrence in the statement.
+        $stripped = preg_replace(
+            '/^(.*)\s+ON\s+DUPLICATE\s+KEY\s+UPDATE\b.*$/is',
+            '$1',
+            $sql
+        );
+        if (!\is_string($stripped)) {
+            return $sql;
+        }
+
+        // INSERT [IGNORE] INTO -> INSERT OR REPLACE INTO.
+        $rewritten = preg_replace(
+            '/^(\s*)INSERT\s+(?:IGNORE\s+)?INTO\b/i',
+            '${1}INSERT OR REPLACE INTO',
+            $stripped,
+            1,
+            $count
+        );
+
+        // If there was no INTO to anchor on, leave the statement alone
+        // rather than emit an INSERT that would still fail on conflict.
+        if (!\is_string($rewritten) || $count === 0) {
+            return $sql;
+        }
+
+        return $rewritten;
+    }
+
+    /**
+     * `DELETE a, b FROM t a, t b WHERE ...` (MySQL multi-table DELETE)
+     * → `DELETE FROM t WHERE rowid IN (
+     *        SELECT a.rowid FROM t a, t b WHERE ...
+     *        UNION SELECT b.rowid FROM t a, t b WHERE ...)`.
+     *
+     * Only the self-join shape WordPress core emits is rewritten — every
+     * delete-target alias must resolve to the same base table, as in
+     * `delete_expired_transients()` (`DELETE a, b FROM wp_options a,
+     * wp_options b ...` / the wp_sitemeta variant). The rows to delete are
+     * addressed by `rowid`, which is stable for the ordinary (rowid)
+     * tables WordPress uses. Anything that does not match this shape —
+     * including an ordinary single-table `DELETE FROM t WHERE ...` — is
+     * returned unchanged.
+     */
+    public static function rewriteMultiTableDelete(string $sql): string
+    {
+        // DELETE <alias>, <alias>[, ...] FROM <from-list> WHERE <cond>
+        if (!preg_match(
+            '/^\s*DELETE\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)+)'
+            . '\s+FROM\s+(.+?)\s+WHERE\s+(.*)$/is',
+            $sql,
+            $m
+        )) {
+            return $sql;
+        }
+
+        $targets = preg_split('/\s*,\s*/', trim($m[1])) ?: [];
+        $fromClause = trim($m[2]);
+        $where = $m[3];
+
+        // Map each "<table> [AS] <alias>" reference to its base table.
+        $aliasTable = [];
+        foreach (preg_split('/\s*,\s*/', $fromClause) ?: [] as $ref) {
+            if (preg_match(
+                '/^\s*(`[^`]+`|[a-zA-Z_][a-zA-Z0-9_]*)\s+(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*$/i',
+                $ref,
+                $rm
+            )) {
+                $aliasTable[$rm[2]] = $rm[1];
+            }
+        }
+
+        // Every delete target must resolve to the same base table for the
+        // single-table rowid rewrite to be equivalent.
+        $outerTable = null;
+        foreach ($targets as $t) {
+            if (!isset($aliasTable[$t])) {
+                return $sql;
+            }
+            if ($outerTable === null) {
+                $outerTable = $aliasTable[$t];
+            } elseif ($aliasTable[$t] !== $outerTable) {
+                return $sql;
+            }
+        }
+        if ($outerTable === null) {
+            return $sql;
+        }
+
+        $selects = [];
+        foreach ($targets as $t) {
+            $selects[] = "SELECT {$t}.rowid FROM {$fromClause} WHERE {$where}";
+        }
+
+        return "DELETE FROM {$outerTable} WHERE rowid IN ("
+            . implode(' UNION ', $selects) . ')';
     }
 
     /**
