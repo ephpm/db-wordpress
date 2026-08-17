@@ -337,12 +337,46 @@ class Db extends \wpdb
     public static function translateMysqlToBridge(string $sql): string
     {
         $sql = self::rewriteOnDuplicateKeyUpdate($sql);
+        $sql = self::rewriteInsertIgnore($sql);
         $sql = self::rewriteMultiTableDelete($sql);
         $sql = self::rewriteAliasJoinDelete($sql);
         $sql = self::rewriteTruncate($sql);
         $sql = self::stripOnUpdateCurrentTimestamp($sql);
         $sql = self::rewriteUnsupportedAlter($sql);
+        $sql = self::rewriteInformationSchemaIndexProbe($sql);
         $sql = self::stripFromDual($sql);
+
+        return $sql;
+    }
+
+    /**
+     * `INSERT IGNORE INTO …` → `INSERT OR IGNORE INTO …`. MySQL's IGNORE
+     * modifier (skip rows that would violate a constraint) maps exactly to
+     * SQLite's `OR IGNORE` conflict clause. The `INSERT IGNORE` +
+     * `ON DUPLICATE KEY UPDATE` combination is handled earlier by
+     * {@see Db::rewriteOnDuplicateKeyUpdate()} (→ INSERT OR REPLACE), so by
+     * the time this runs only a plain `INSERT IGNORE` remains. WooCommerce's
+     * lookup-table population (`wp_wc_category_lookup`) uses it.
+     */
+    public static function rewriteInsertIgnore(string $sql): string
+    {
+        $out = preg_replace('/^(\s*)INSERT\s+IGNORE\s+INTO\b/i', '${1}INSERT OR IGNORE INTO', $sql, 1, $count);
+
+        return (\is_string($out) && $count > 0) ? $out : $sql;
+    }
+
+    /**
+     * A WooCommerce / plugin index-existence probe against
+     * `INFORMATION_SCHEMA.STATISTICS` — which the embedded engine has no
+     * equivalent for — is rewritten to `SELECT 1`, reporting the index as
+     * present so the caller skips the follow-up `ALTER TABLE … ADD/DROP KEY`
+     * that SQLite cannot perform anyway (the key was fixed at CREATE time).
+     */
+    public static function rewriteInformationSchemaIndexProbe(string $sql): string
+    {
+        if (preg_match('/^\s*SELECT\b.*\bFROM\s+INFORMATION_SCHEMA\.STATISTICS\b/is', $sql)) {
+            return 'SELECT 1';
+        }
 
         return $sql;
     }
@@ -562,10 +596,25 @@ class Db extends \wpdb
     {
         $trimmed = ltrim($sql);
 
-        if (preg_match('/^ALTER\s+TABLE\s+.+?\bCONVERT\s+TO\s+CHARACTER\s+SET\b/is', $trimmed)) {
+        if (!preg_match('/^ALTER\s+TABLE\b/i', $trimmed)) {
+            return $sql;
+        }
+
+        if (preg_match('/\bCONVERT\s+TO\s+CHARACTER\s+SET\b/is', $trimmed)) {
             return 'SELECT 1';
         }
 
+        // `DROP PRIMARY KEY` (usually paired with re-adding a PRIMARY/UNIQUE
+        // KEY) cannot be expressed in SQLite at all — the key is part of the
+        // CREATE TABLE. These statements are idempotent schema-normalisation
+        // upgrades (WooCommerce's order-lookup / sessions / downloadable
+        // permissions tables) whose target key already exists, so no-op them.
+        if (preg_match('/\bDROP\s+PRIMARY\s+KEY\b/is', $trimmed)) {
+            return 'SELECT 1';
+        }
+
+        // Column re-typing/renaming SQLite cannot do in place, when the
+        // statement is exclusively CHANGE/MODIFY (no ADD/DROP we would drop).
         if (
             preg_match('/^ALTER\s+TABLE\s+\S+\s+(?:CHANGE|MODIFY)\b/is', $trimmed)
             && !preg_match('/\b(?:ADD|DROP)\s/i', $trimmed)

@@ -43,6 +43,58 @@ final class TranslateDdlTest extends TestCase
         );
     }
 
+    // ── INSERT IGNORE ───────────────────────────────────────────────────
+
+    public function testInsertIgnoreBecomesInsertOrIgnore(): void
+    {
+        $this->assertSame(
+            'INSERT OR IGNORE INTO wp_wc_category_lookup (category_id, category_tree_id) VALUES (5, 5)',
+            Db::translateMysqlToBridge('INSERT IGNORE INTO wp_wc_category_lookup (category_id, category_tree_id) VALUES (5, 5)')
+        );
+    }
+
+    public function testOrdinaryInsertUntouched(): void
+    {
+        $sql = 'INSERT INTO wp_options (option_name, option_value) VALUES (?, ?)';
+        $this->assertSame($sql, Db::translateMysqlToBridge($sql));
+    }
+
+    // ── DROP PRIMARY KEY no-op ──────────────────────────────────────────
+
+    public function testDropPrimaryKeyIsNoop(): void
+    {
+        $this->assertSame(
+            'SELECT 1',
+            Db::translateMysqlToBridge('ALTER TABLE wp_wc_order_product_lookup DROP PRIMARY KEY, ADD PRIMARY KEY (order_item_id, order_id)')
+        );
+        $this->assertSame(
+            'SELECT 1',
+            Db::translateMysqlToBridge(
+                'ALTER TABLE `wp_woocommerce_sessions` DROP PRIMARY KEY, DROP KEY `session_id`, '
+                . 'ADD PRIMARY KEY(`session_id`), ADD UNIQUE KEY(`session_key`)'
+            )
+        );
+    }
+
+    public function testAlterAddColumnStillWorksWithoutDropPk(): void
+    {
+        $sql = 'ALTER TABLE wp_t ADD COLUMN extra text';
+        $this->assertSame($sql, Db::translateMysqlToBridge($sql));
+    }
+
+    // ── INFORMATION_SCHEMA index probe ──────────────────────────────────
+
+    public function testInformationSchemaStatisticsProbeReturnsOne(): void
+    {
+        $this->assertSame(
+            'SELECT 1',
+            Db::translateMysqlToBridge(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() "
+                . "AND TABLE_NAME = 'wp_wc_order_product_lookup' AND INDEX_NAME = 'PRIMARY'"
+            )
+        );
+    }
+
     // ── ALTER no-ops ────────────────────────────────────────────────────
 
     public function testConvertToCharacterSetIsNoop(): void
