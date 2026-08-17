@@ -20,6 +20,48 @@ final class TranslateDdlTest extends TestCase
         return new Db('u', 'p', 'wordpress', 'localhost', new PdoSqliteDbOps());
     }
 
+    // ── UPDATE/DELETE ORDER BY LIMIT ────────────────────────────────────
+
+    public function testUpdateOrderByLimitRewrite(): void
+    {
+        $this->assertSame(
+            "UPDATE wp_posts SET post_password = 'x' WHERE rowid IN (SELECT rowid FROM wp_posts "
+            . "WHERE post_type = 'scheduled-action' ORDER BY menu_order ASC, ID ASC LIMIT 25)",
+            Db::translateMysqlToBridge(
+                "UPDATE wp_posts SET post_password = 'x' WHERE post_type = 'scheduled-action' "
+                . "ORDER BY menu_order ASC, ID ASC LIMIT 25"
+            )
+        );
+    }
+
+    public function testUpdateLimitWithoutOrderRewrite(): void
+    {
+        $this->assertSame(
+            'UPDATE wp_t SET a = 1 WHERE rowid IN (SELECT rowid FROM wp_t WHERE b = 2 LIMIT 5)',
+            Db::translateMysqlToBridge('UPDATE wp_t SET a = 1 WHERE b = 2 LIMIT 5')
+        );
+    }
+
+    public function testDeleteOrderByLimitRewrite(): void
+    {
+        $this->assertSame(
+            'DELETE FROM wp_t WHERE rowid IN (SELECT rowid FROM wp_t WHERE b = 2 ORDER BY id ASC LIMIT 10)',
+            Db::translateMysqlToBridge('DELETE FROM wp_t WHERE b = 2 ORDER BY id ASC LIMIT 10')
+        );
+    }
+
+    public function testUpdateWithoutLimitUntouched(): void
+    {
+        $sql = "UPDATE wp_options SET option_value = 'x' WHERE option_name = 'y'";
+        $this->assertSame($sql, Db::translateMysqlToBridge($sql));
+    }
+
+    public function testSelectWithLimitUntouched(): void
+    {
+        $sql = 'SELECT * FROM wp_posts WHERE post_status = ? ORDER BY post_date DESC LIMIT 10';
+        $this->assertSame($sql, Db::translateMysqlToBridge($sql));
+    }
+
     // ── ON UPDATE CURRENT_TIMESTAMP ─────────────────────────────────────
 
     public function testStripsOnUpdateCurrentTimestamp(): void
