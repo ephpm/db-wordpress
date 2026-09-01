@@ -21,13 +21,12 @@ translation the MySQL wire frontend serves, without the TCP round trip.
 `SHOW TABLES`, `DESCRIBE`, `information_schema` queries, `SET NAMES`,
 and `BEGIN`/`COMMIT`/`ROLLBACK` behave exactly as they do over the wire.
 
-> **Requires unreleased ePHPm.** The `ephpm_db_*` SAPI functions exist
-> only on ePHPm **main** (merged in
-> [ephpm#257](https://github.com/ephpm/ephpm/pull/257)) — they are **not
-> in any tagged release** (newest at time of writing: v0.6.2). And they
-> are only registered when `[db.sqlite]` is active. On anything else,
-> the drop-in cleanly falls back to the stock mysqli `wpdb` (see
-> [Graceful fallback](#graceful-fallback)).
+> **Requires ePHPm v0.6.3 or newer** (current release: v0.8.6). The
+> `ephpm_db_*` SAPI functions (merged in
+> [ephpm#257](https://github.com/ephpm/ephpm/pull/257)) first shipped in
+> the v0.6.3 release, and they are only registered when `[db.sqlite]` is
+> active. On anything else, the drop-in cleanly falls back to the stock
+> mysqli `wpdb` (see [Graceful fallback](#graceful-fallback)).
 
 ---
 
@@ -56,7 +55,8 @@ and `BEGIN`/`COMMIT`/`ROLLBACK` behave exactly as they do over the wire.
   core is pulled in as a **dev dependency only** (the test suite runs
   against the real `class-wpdb.php`); the shipped package has no
   WordPress Composer dependency.
-- **The ePHPm runtime, built from main**, with `[db.sqlite]` configured.
+- **ePHPm v0.6.3 or newer** (current release: v0.8.6), with
+  `[db.sqlite]` configured.
   The global `ephpm_db_query()` / `ephpm_db_execute()` functions are
   registered by ePHPm's embedded PHP; under PHP-FPM, Apache mod_php, or
   stock php-cli they don't exist and the drop-in steps aside.
@@ -78,8 +78,14 @@ running without `[db.sqlite]`.
 
 ## Install
 
+ePHPm packages are distributed via their GitHub repositories, not
+Packagist. Add this repo as a Composer `vcs` repository, then require
+the package (`ephpm/db-wordpress` is tagged `v0.1.0`, so `^0.1`
+resolves):
+
 ```bash
-composer require ephpm/db-wordpress
+composer config repositories.ephpm/db-wordpress vcs https://github.com/ephpm/db-wordpress
+composer require ephpm/db-wordpress:^0.1
 ```
 
 Then activate the drop-in by copying it into `wp-content/`:
@@ -316,7 +322,8 @@ only. **It has not been integration-tested against a live ePHPm main
 build as part of this release.** To smoke it yourself:
 
 ```bash
-# 1. Build ePHPm from main (the ephpm_db_* functions are not in any release):
+# 1. Get an ePHPm binary, v0.6.3 or newer — download a release from
+#    https://github.com/ephpm/ephpm/releases, or build from source:
 git clone https://github.com/ephpm/ephpm && cd ephpm
 cargo xtask release                      # → target/release/ephpm
 
@@ -347,7 +354,8 @@ The drop-in fell back. Check the PHP error log for
 `ephpm db.php: ephpm_db_query() is not available` — you're not running
 inside ePHPm, or `[db.sqlite]` isn't configured (the functions are only
 registered when the embedded database is active). Remember the bridge
-requires an ePHPm **main** build, not v0.6.2 or older.
+requires ePHPm **v0.6.3 or newer** — on v0.6.2 or older the
+`ephpm_db_*` functions don't exist.
 
 ### `ephpm db.php: could not locate Ephpm\Db\WordPress\Db`
 
