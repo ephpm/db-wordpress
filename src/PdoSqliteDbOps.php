@@ -41,7 +41,7 @@ final class PdoSqliteDbOps implements DbOpsInterface
         if ($this->isNoOp($sql)) {
             return [];
         }
-        $stmt = $this->run($sql, $params);
+        $stmt = $this->exec($sql, $params);
         if ($stmt->columnCount() === 0) {
             return []; // No-rowset statement routed through query().
         }
@@ -55,9 +55,60 @@ final class PdoSqliteDbOps implements DbOpsInterface
         if ($this->isNoOp($sql)) {
             return ['affected_rows' => 0, 'last_insert_id' => 0];
         }
-        $stmt = $this->run($sql, $params);
+        $stmt = $this->exec($sql, $params);
 
         return [
+            'affected_rows' => $stmt->rowCount(),
+            'last_insert_id' => (int) $this->pdo->lastInsertId(),
+        ];
+    }
+
+    public function run(string $sql, array $params = []): array
+    {
+        if ($this->isNoOp($sql)) {
+            return [
+                'has_rowset' => false,
+                'rows' => [],
+                'columns' => [],
+                'affected_rows' => 0,
+                'last_insert_id' => 0,
+            ];
+        }
+
+        $stmt = $this->exec($sql, $params);
+        $ncols = $stmt->columnCount();
+        $hasRowset = $ncols > 0;
+
+        // Column metadata is read straight from the statement, so it is
+        // present even when the result set matched zero rows (issue #262).
+        $columns = [];
+        for ($i = 0; $i < $ncols; $i++) {
+            /** @var array<string, mixed>|false $meta */
+            $meta = $stmt->getColumnMeta($i);
+            $decl = \is_array($meta) ? ($meta['sqlite:decl_type'] ?? null) : null;
+            $columns[] = [
+                'name' => \is_array($meta) ? (string) ($meta['name'] ?? '') : '',
+                'type' => \is_string($decl) && $decl !== '' ? $decl : null,
+            ];
+        }
+
+        if ($hasRowset) {
+            /** @var list<array<string, int|float|string|null>> $rows */
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+            return [
+                'has_rowset' => true,
+                'rows' => $rows,
+                'columns' => $columns,
+                'affected_rows' => 0,
+                'last_insert_id' => 0,
+            ];
+        }
+
+        return [
+            'has_rowset' => false,
+            'rows' => [],
+            'columns' => [],
             'affected_rows' => $stmt->rowCount(),
             'last_insert_id' => (int) $this->pdo->lastInsertId(),
         ];
@@ -69,7 +120,7 @@ final class PdoSqliteDbOps implements DbOpsInterface
         return (bool) preg_match('/^\s*SET\s/i', $sql);
     }
 
-    private function run(string $sql, array $params): \PDOStatement
+    private function exec(string $sql, array $params): \PDOStatement
     {
         try {
             $stmt = $this->pdo->prepare(self::mysqlToSqlite($sql));
