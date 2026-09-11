@@ -252,11 +252,15 @@ class Db extends \wpdb
      * private `_do_query()` (which performs the mysqli_query() call).
      * Same SAVEQUERIES/timer/num_queries behavior as core.
      *
-     * Statements that can produce a rowset route through
-     * `ephpm_db_query()`; everything else routes through
-     * `ephpm_db_execute()` so affected-rows/insert-id metadata is
-     * captured. Bridge exceptions are staged, not rethrown — wpdb's
-     * contract is error-in-band via `$last_error`.
+     * A single `ephpm_db_run()` executes the statement and reports what it
+     * actually did: `has_rowset` (read from the executed statement, never
+     * guessed from the first keyword), the rows, the column metadata (present
+     * even for a zero-row result set — issue #262), and the affected-rows /
+     * insert-id metadata. This replaces the previous hand-rolled keyword
+     * routing between `ephpm_db_query()` and `ephpm_db_execute()`; the ops
+     * backend preserves the older ePHPm floor by falling back to those two
+     * when `ephpm_db_run()` is absent. Bridge exceptions are staged, not
+     * rethrown — wpdb's contract is error-in-band via `$last_error`.
      *
      * @param string $query The query to run.
      */
@@ -278,14 +282,19 @@ class Db extends \wpdb
         $bridgeSql = self::translateMysqlToBridge($query);
 
         try {
-            if ($this->is_rowset_query($bridgeSql)) {
-                $rows = $this->dbOps->query($bridgeSql);
-                $this->bridgeRows = $rows;
-                if (isset($rows[0])) {
-                    $this->bridgeColNames = array_keys($rows[0]);
-                }
+            $result = $this->dbOps->run($bridgeSql);
+
+            // Column names come from the executed statement's metadata, so
+            // they survive a zero-row result set (issue #262).
+            $this->bridgeColNames = array_column($result['columns'] ?? [], 'name');
+
+            if (!empty($result['has_rowset'])) {
+                $this->bridgeRows = $result['rows'] ?? [];
             } else {
-                $this->bridgeOk = $this->dbOps->execute($bridgeSql);
+                $this->bridgeOk = [
+                    'affected_rows' => (int) ($result['affected_rows'] ?? 0),
+                    'last_insert_id' => (int) ($result['last_insert_id'] ?? 0),
+                ];
             }
         } catch (\Throwable $e) {
             $this->bridgeError = $e->getMessage();
@@ -303,21 +312,6 @@ class Db extends \wpdb
                 []
             );
         }
-    }
-
-    /**
-     * Whether a statement should route through `ephpm_db_query()`
-     * (rowset-shaped) rather than `ephpm_db_execute()` (OK-shaped).
-     */
-    protected function is_rowset_query(string $query): bool
-    {
-        $q = ltrim($query, " \t\r\n(");
-        // Strip leading comments so /* hints */ don't confuse routing.
-        while (preg_match('/^(?:\/\*.*?\*\/|--[^\n]*(?:\n|$)|#[^\n]*(?:\n|$))\s*/s', $q, $m)) {
-            $q = substr($q, \strlen($m[0]));
-        }
-
-        return (bool) preg_match('/^(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN|WITH|VALUES|TABLE)\b/i', $q);
     }
 
     // ── MySQL-dialect fix-ups the embedded engine can't do ───────────────
@@ -738,11 +732,13 @@ class Db extends \wpdb
 
     /**
      * Synthesizes column metadata from the last rowset. The bridge
-     * returns rows keyed by column name but no field metadata, so only
-     * `name`/`orgname` are meaningful; the other mysqli field properties
-     * are present (so `get_col_info()` calls don't error) but carry
-     * placeholder values. An empty rowset has no column names at all —
-     * a documented bridge limitation.
+     * reports each column's name (and declared type, unused here) via
+     * `ephpm_db_run()`/`ephpm_db_columns()`, so only `name`/`orgname` are
+     * meaningful; the other mysqli field properties are present (so
+     * `get_col_info()` calls don't error) but carry placeholder values.
+     * The column names are read from the executed statement's metadata, so
+     * they are available even for a zero-row result set (issue #262) — the
+     * former "empty rowset has no column names" limitation is gone.
      */
     protected function load_col_info()
     {

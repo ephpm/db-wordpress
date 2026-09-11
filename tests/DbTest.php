@@ -160,10 +160,11 @@ final class DbTest extends TestCase
         $db->get_results('SELECT id, name AS label FROM wp_items');
         $this->assertSame(['id', 'label'], $db->get_col_info('name'));
 
-        // Documented bridge limitation: an empty rowset carries no column
-        // metadata, so get_col_info() has nothing to report.
-        $db->get_results('SELECT id FROM wp_items WHERE id = -1');
-        $this->assertNull($db->get_col_info('name'));
+        // A zero-row result set still carries its column names now that the
+        // metadata comes from the executed statement, not the rows
+        // (ephpm_db_run()/ephpm_db_columns(), issue #262).
+        $db->get_results('SELECT id, name AS label FROM wp_items WHERE id = -1');
+        $this->assertSame(['id', 'label'], $db->get_col_info('name'));
     }
 
     // ── Errors are in-band (wpdb contract) ──────────────────────────────

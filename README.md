@@ -21,7 +21,7 @@ translation the MySQL wire frontend serves, without the TCP round trip.
 `SHOW TABLES`, `DESCRIBE`, `information_schema` queries, `SET NAMES`,
 and `BEGIN`/`COMMIT`/`ROLLBACK` behave exactly as they do over the wire.
 
-> **Requires ePHPm v0.6.3 or newer** (current release: v0.8.6). The
+> **Requires ePHPm v0.6.3 or newer** (current release: v0.10.2). The
 > `ephpm_db_*` SAPI functions (merged in
 > [ephpm#257](https://github.com/ephpm/ephpm/pull/257)) first shipped in
 > the v0.6.3 release, and they are only registered when `[db.sqlite]` is
@@ -55,7 +55,7 @@ and `BEGIN`/`COMMIT`/`ROLLBACK` behave exactly as they do over the wire.
   core is pulled in as a **dev dependency only** (the test suite runs
   against the real `class-wpdb.php`); the shipped package has no
   WordPress Composer dependency.
-- **ePHPm v0.6.3 or newer** (current release: v0.8.6), with
+- **ePHPm v0.6.3 or newer** (current release: v0.10.2), with
   `[db.sqlite]` configured.
   The global `ephpm_db_query()` / `ephpm_db_execute()` functions are
   registered by ePHPm's embedded PHP; under PHP-FPM, Apache mod_php, or

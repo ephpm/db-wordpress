@@ -46,4 +46,24 @@ interface DbOpsInterface
      * @throws \Exception on a database error (code = MySQL errno).
      */
     public function execute(string $sql, array $params = []): array;
+
+    /**
+     * Execute SQL once and report what it actually did — the unified entry
+     * point mirroring the native `ephpm_db_run()` (ePHPm issue #263).
+     *
+     * `has_rowset` is the authoritative discriminator, read from the
+     * executed statement rather than inferred from the SQL's first keyword.
+     * `rows` is always an array (empty when `has_rowset` is false).
+     * `columns` carries the column metadata as a list of
+     * `['name' => string, 'type' => ?string]`, present even for a zero-row
+     * result set (ePHPm issue #262) — which the rows alone cannot supply.
+     * `affected_rows`/`last_insert_id` are zero for a result set.
+     *
+     * @param list<mixed> $params
+     *
+     * @return array{has_rowset: bool, rows: list<array<string, int|float|string|null>>, columns: list<array{name: string, type: ?string}>, affected_rows: int, last_insert_id: int}
+     *
+     * @throws \Exception on a database error (code = MySQL errno).
+     */
+    public function run(string $sql, array $params = []): array;
 }
